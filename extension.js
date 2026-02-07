@@ -1,5 +1,6 @@
 const vscode = require('vscode');
 const https = require('https');
+const { HttpsProxyAgent } = require('https-proxy-agent');
 
 /**
  * GLM Usage Monitor Extension 4.10.1
@@ -85,11 +86,33 @@ class GLMUsageService {
     async request(url, config) {
         return new Promise((resolve, reject) => {
             const parsedUrl = new URL(url);
+
+            // 获取代理设置：环境变量或VS Code配置
+            let proxyUrl = process.env.HTTPS_PROXY || process.env.HTTP_PROXY || process.env.https_proxy || process.env.http_proxy;
+
+            // 如果环境变量没有，尝试从VS Code代理设置获取
+            if (!proxyUrl) {
+                const vscodeProxy = vscode.workspace.getConfiguration('http').get('proxy');
+                if (vscodeProxy) {
+                    proxyUrl = vscodeProxy;
+                }
+            }
+
             const options = {
-                hostname: parsedUrl.hostname, port: 443, path: parsedUrl.pathname + parsedUrl.search,
-                method: 'GET', rejectUnauthorized: false, timeout: config.timeout,
+                hostname: parsedUrl.hostname,
+                port: 443,
+                path: parsedUrl.pathname + parsedUrl.search,
+                method: 'GET',
+                rejectUnauthorized: false,
+                timeout: config.timeout,
                 headers: { 'Authorization': config.authToken, 'Content-Type': 'application/json' }
             };
+
+            // 如果有代理，使用代理agent
+            if (proxyUrl) {
+                options.agent = new HttpsProxyAgent(proxyUrl);
+            }
+
             const req = https.request(options, (res) => {
                 let body = '';
                 res.on('data', c => body += c);
@@ -201,12 +224,13 @@ class GLMUsageService {
         md.appendMarkdown(`${drawBar(data.quotas.token5h.pct, t5hColor)} &nbsp; ${this.formatTokens(data.quotas.token5h.used || 0)}/${this.formatTokens(data.quotas.token5h.total || 0)}\n\n`);
 
         if (data.history.length > 0) {
-            // Calculate peak from full history
-            const peak = data.history.reduce((a, b) => a.calls > b.calls ? a : b);
-            const peakTime = peak.time.split(' ')[1] || peak.time;
-
-            md.appendMarkdown(`**调用趋势 (24H)** &nbsp;&nbsp;&nbsp; <span style="color:#8b949e;font-size:12px">峰值: **${peak.calls}** (${peakTime})</span>\n\n`);
-
+            // Calculate peak from full history, filter out null/undefined calls
+            const validHistory = data.history.filter(h => h.calls != null && h.calls !== undefined);
+            if (validHistory.length > 0) {
+                const peak = validHistory.reduce((a, b) => a.calls > b.calls ? a : b);
+                const peakTime = peak.time.split(' ')[1] || peak.time;
+                md.appendMarkdown(`**调用趋势 (24H)** &nbsp;&nbsp;&nbsp; <span style="color:#8b949e;font-size:12px">峰值: **${peak.calls}** (${peakTime})</span>\n\n`);
+            }
             md.appendMarkdown(`![](${this.generateTrendSVG(data.history)})\n\n`);
         } else {
             md.appendMarkdown(`**调用趋势 (24H)**\n\n`);
@@ -234,7 +258,7 @@ class GLMUsageService {
             points.unshift({ calls: 0, time: '' });
         }
 
-        const maxCalls = Math.max(...points.map(h => h.calls), 1);
+        const maxCalls = Math.max(...points.map(h => h.calls || 0), 1);
 
         let rects = '';
         points.forEach((p, i) => {
